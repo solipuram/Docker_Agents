@@ -1,0 +1,13 @@
+podTemplate(containers: [containerTemplate(name: 'docker', image: 'docker:latest', ttyEnabled: true, command: 'cat'),],
+            volumes: [hostPathVolume(hostPath: '/var/run/docker.sock', mountPath: '/var/run/docker.sock')])
+
+    {
+        node(POD_LABEL) {
+        checkout()
+        buildImage_dev()
+        pushImage_dev()
+        
+    }
+    }
+
+

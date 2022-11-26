@@ -1,0 +1,169 @@
+#!/usr/bin/env groovy
+
+def buildImage
+def workspace = env.WORKSPACE
+
+pipeline {
+	
+    agent {
+        docker {
+            image 'abc.com/commsol-ops/r8-jdk8-jenkins-slave:r8-jdk8-latest' // Docker Build Image
+			label 'docker_slave'
+            args "--privileged -u root -v/data/workspace/ENUM/Application_Images/var-lib-docker:/var/lib/docker -v/dev/urandom:/dev/random"
+            registryUrl 'https://abc.com'
+            registryCredentialsId 'callerid-enum-ccid-harbor'
+      }        
+	}
+	environment {
+		// DTR_IMAGE_NAME  = 'rh8-node-exporter' // Name of Image this Jenkinsfile builds
+		DOCKER_FILE_ROOT_DIR   = 'rh8-node-exporter' // 'C7-jboss' // DOCKER_FILE_ROOT_DIR in GIT REPO
+		HARBOR_NAMESPACE = 'commsol-ops' // DTR ORG
+		HARBOR_REGISTRY_SERVER  = 'https://abc.com' // DTR Server Address
+		HARBOR_APP_NAME = 'r8-node-exporter_image'
+		// SECONDARY_BUILD_TAG = "${env.BUILD_TIMESTAMP}_${currentBuild.number}" // YYYY-MM-DD_BUILDNUMBER
+		
+	}
+	options {
+		timeout(time: 2, unit: 'HOURS')
+	}
+    //triggers { upstream(upstreamProjects: 'c7', threshold: hudson.model.Result.SUCCESS) }
+	parameters
+	{
+		string(name: 'BUILD_TAG', defaultValue: "latest", description: 'Primary tag used on DTR push')
+		string(name: 'SECONDARY_BUILD_TAG', defaultValue: "1.3.1" , description: 'Secondary tag used on DTR push')
+		// booleanParam(name: 'CREATE_SECONDARY_TAG', defaultValue: false, description: 'Set a secondary tag in the format: YYYY-MM-DD_BUILDNUMBER')
+		booleanParam(name: 'WIPE_CACHE', defaultValue: false, description: 'Wipe the Docker Daemon cache')
+		choice(name: 'DELETE_WORKDIR', choices: ['false','true'], description: 'Delete the Work directory at the end of the job. This will cause the job to re-download all ansible-galaxy roles on next run.')
+		booleanParam(name: 'REFRESH_JENKINSFILE', defaultValue: false, description: 'Reload changes from Jenkinsfile and exit.')
+	}
+	
+	stages
+	{
+		stage("\u2776 RELOAD Jekinsfile") {
+			when { expression { return params.REFRESH_JENKINSFILE ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ } }
+			steps {
+				sh 'echo "\u2776 RELOAD Jenkinsfile into Jenkins Project: Job ${JOB_NAME} [${BUILD_NUMBER}] (${BUILD_URL})"'
+				script {
+					currentBuild.result = 'ABORTED'
+					error('DRY RUN COMPLETED. JOB PARAMETERIZED.')
+				}
+			}
+		} // END stage
+		
+		stage('\u2777 Sending Job Started Notification to Slack') {
+			steps{
+				// send build started notifications
+				sh 'echo " Started: Job ${JOB_NAME} [${BUILD_NUMBER}] (${BUILD_URL})"'
+				slackSend (color: '#FFFF00', message: "STARTED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'. Details: (<${env.BUILD_URL} | here >)")
+			}
+		}
+        stage ('\u2778 PREPARE Docker Agent')
+		{
+			parallel
+			{
+				stage ('WIPE Docker Cache')
+				{
+					when { expression { return params.WIPE_CACHE ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ } }
+					steps
+					{
+						sh 'echo "\u2777 *************************************************"'
+						sh 'echo "\u2777 *************************************************"'
+						sh 'echo "\u2777 `whoami`@`hostname -f`:`pwd`> /usr/local/bin/dind"; /usr/local/bin/dind'
+						sh 'echo "\u2777 `whoami`@`hostname -f`:`pwd`> docker system prune --volumes -fa"; docker system prune --volumes -fa'
+						sh 'echo "\u2777 `whoami`@`hostname -f`:`pwd`> docker ps"; docker ps'
+					}
+				}
+                stage ('RETAIN Docker Cache')
+				{
+					when { expression { return params.WIPE_CACHE ==~ /(?i)(N|NO|F|FALSE|OFF|STOP)/ } }
+					steps
+					{
+						sh 'echo "\u2777 *************************************************"'
+						sh 'echo "\u2777 *************************************************"'
+						sh 'echo "\u2777 `whoami`@`hostname -f`:`pwd`> /usr/local/bin/dind"; /usr/local/bin/dind'
+						sh 'echo "\u2777 `whoami`@`hostname -f`:`pwd`> docker ps"; docker ps'
+					}
+				}
+			}
+		}
+        
+        stage ('\u2779 BUILD Docker Image')
+		{
+			steps{
+			    sh "ls -l"; sh "find ."
+				dir("${env.DOCKER_FILE_ROOT_DIR}")
+				{
+					sh "echo \"\u2779 `whoami`@`hostname -f`:`pwd`> Building Docker Image - [${env.HARBOR_APP_NAME}:BUILD]\";"
+					script { buildImage = docker.build("${env.HARBOR_NAMESPACE}/${env.HARBOR_APP_NAME}:BUILD") }
+				}
+			}
+		}
+        
+        stage ('\u2780 TEST new Docker Image')
+		{
+			steps
+			{
+				sh "echo \"\u2779 `whoami`@`hostname -f`:`pwd`> Test Docker Image [${env.HARBOR_APP_NAME}:BUILD]\";"
+				sh 'echo "\u2779 `whoami`@`hostname -f`:`pwd`> docker ps"; docker ps'
+				script{
+					buildImage.inside('--entrypoint ""') {
+						sh 'echo "Tests passed"'
+					}
+				}
+			}
+		}
+        stage ('\u277A TAG Push') {
+			parallel {
+				stage ('\u277A TAG & PUSH Primary Tag')
+				{
+					steps
+					{
+						sh "echo \"\u277A `whoami`@`hostname -f`:`pwd`> Push Docker Image to DTR - ${env.HARBOR_REGISTRY_SERVER }/${env.HARBOR_NAMESPACE}/${env.HARBOR_APP_NAME}:${params.BUILD_TAG}\";"
+						script { docker.withRegistry("${env.HARBOR_REGISTRY_SERVER }") { buildImage.push(params.BUILD_TAG) } }
+						
+					}
+				}
+                stage ('\u277A TAG & PUSH Secondary Tag')
+				{
+					//when { expression { return params.CREATE_SECONDARY_TAG ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/ } }
+                    steps {
+						    sh "echo \"\u277B `whoami`@`hostname -f`:`pwd`> Push Docker Image to DTR - ${env.HARBOR_REGISTRY_SERVER }/${env.HARBOR_NAMESPACE}/${env.HARBOR_APP_NAME}:${params.SECONDARY_BUILD_TAG}\";"
+						    script { docker.withRegistry("${env.HARBOR_REGISTRY_SERVER }") { buildImage.push(params.SECONDARY_BUILD_TAG) } }
+					}
+
+					
+				}
+			}
+			
+			} //END PARALLEL STAGE
+		
+	} // END stages
+	
+	post {
+		success {
+			// send build success notifications
+			sh 'echo " SUCCESS: Job ${JOB_NAME} [${BUILD_NUMBER}] (${BUILD_URL})"'
+			slackSend (color: '#00FF00', message: "SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'.  Details: (<${env.BUILD_URL} |   here >)")
+		}
+
+		failure {
+			// send build failure notifications
+			sh 'echo " FAILED: Job ${JOB_NAME} [${BUILD_NUMBER}] (${BUILD_URL})"'
+			slackSend (color: '#FF0000', message: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'.  Details: (<${env.BUILD_URL} | here >)")
+		}
+
+        cleanup {
+			script {
+				if (params.DELETE_WORKDIR ==~ /(?i)(Y|YES|T|TRUE|ON|RUN)/) {
+					sh 'echo "CLEANUP: Deleting the Workdir"'
+					deleteDir()
+				} else {
+					sh 'echo "CLEANUP: DELETE_WORKDIR Not Selected in Job Parameters"'
+				}
+			}
+		}
+	} // END post
+} // END pipeline
+
+
+

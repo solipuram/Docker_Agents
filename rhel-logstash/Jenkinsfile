@@ -1,0 +1,32 @@
+pipeline {
+   // agent { container-node }
+    
+
+    agent {
+             label 'Container-node'
+         }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git url: "git url",
+              credentialsId: "a209077_id",
+              branch: "dev"
+
+        }
+        }
+
+		stage('Docker Build')
+		{
+            steps {
+					sh ''' 
+                    docker --version              
+                    docker build -t rhel-logstash .
+                    '''
+                  
+				 }
+        }
+    }
+
+
+    }
